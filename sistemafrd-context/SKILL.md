@@ -167,6 +167,31 @@ Solo Master. Permite simular la vista de otros 5 roles (administrador, jefe_oper
 **Qué:** Coexisten 3 collections (`receipts`, `unified_receipts`, `scanned_receipts`) con un script `backend/migrate_unified_receipts.py` cuyo estado de ejecución es desconocido. Distintos endpoints pueden estar leyendo de distintas collections, generando inconsistencias.
 **Qué hacer:** Antes de tocar el flujo de comprobantes, preguntar al usuario qué collection es la canónica y si el script de migración ya corrió en producción. No agregar lecturas/escrituras nuevas hasta tener claridad.
 
+### 🟠 Riesgo 4 (descubierto 28-abril) — 3 tipos de trabajador, no 1
+**Qué:** `calculate_payroll_for_worker` (`server.py:1620-1816`) maneja 3 tipos: `fijo`, `jornal`, `eventual` con fórmulas radicalmente distintas. **Este skill describía solo el flujo `fijo`** (sección 6 — fórmula 50/50). Jornaleros cobran `dias × jornal_base − adelantos − desc`. Eventuales cobran `base_salary − adelantos − desc`. Ninguno recibe descuentos automáticos del APScheduler @ 23:59 (filtra `tipo="fijo"` en `server.py:4554`).
+**Qué hacer:** al estimar trabajo en planilla, confirmar cuál tipo aplica. La fórmula 50/50 NO es universal.
+
+### 🟠 Riesgo 5 (descubierto 28-abril) — Hallazgos de auditoría planilla pendientes de fix
+**Qué:** auditoría completa el 28-abril detectó 3 críticos (denominador prorrateo subestima variable, no hay cierre inmutable, adelantos sin cap). Detalle en `.claude/audits/auditoria-flujo-planilla-2026-04-28.md`. Plan de fixes en 4 sesiones documentado en `CLAUDE.md` sección 28-abril.
+**Qué hacer:** antes de tocar el motor de planilla, leer ese reporte. Cualquier feature que toque `calculate_payroll_for_worker`, `attendance_discounts`, `advances` o `discounts` debe alinearse con las 4 decisiones de negocio tomadas.
+
+---
+
+## 5.5 Decisiones técnicas vigentes (pendientes de implementación)
+
+### Modelo de planilla v2 (decidido 2026-04-28, implementación pendiente en 4 sesiones)
+
+Estas decisiones provienen de la auditoría del 28-abril (`.claude/audits/auditoria-flujo-planilla-2026-04-28.md`). Son la base de los próximos fixes — referenciar antes de proponer alternativas.
+
+- **Denominador del prorrateo:** solo cuentan tareas internas + tareas de OTs **cerradas** (con `conformity_contact`). OTs en `en_ejecucion` NO cuentan.
+- **Tareas no completadas:** las que tienen `overdue_justification` se pagan retroactivamente cuando se completan; las que no, hacen rollover al mes siguiente. **Reutiliza `PUT /api/tasks/{id}/extend`** (server.py:822-840) — NO crear sistema nuevo.
+- **Adelantos:** Admin/Jefe Ops topan en sueldo restante; Master puede override con log en `db.audit_log`. Cap SUNAFIL 30% se extiende a `db.discounts`.
+- **Cierre inmutable mensual:** nueva collection `payroll_snapshots` + endpoint `POST /api/payroll/close-month`. Una vez cerrado, los datos del mes son inmutables para planilla.
+
+### Pendientes de decisión (no documentados aún en código)
+- Jornaleros y eventuales: si deberían recibir descuentos por tardanza/falta. Hoy el APScheduler los excluye explícitamente.
+- Tareas que cruzan meses: política de asignación del campo `month/year` en `db.tasks`.
+
 ---
 
 ## 6. Reglas de oro del negocio (inmutables)
